@@ -27,6 +27,7 @@ class App:
         self.plan = None
         self.messages = queue.Queue()
         self.busy = False
+        self.applied = False        # True after a successful run, until the next scan
 
         frame = tk.Frame(root, padx=24, pady=16)
         frame.pack(fill="both", expand=True)
@@ -79,7 +80,7 @@ class App:
         self.btn_choose.config(state=idle)
         self.btn_scan.config(state="normal" if (self.export_dir and not self.busy) else "disabled")
         self.btn_out.config(state="normal" if (self.plan and not self.busy) else "disabled")
-        ready = self.plan and self.out_dir and not self.busy
+        ready = self.plan and self.out_dir and not self.busy and not self.applied
         self.btn_fix.config(state="normal" if ready else "disabled")
 
     def run_in_thread(self, work, done_kind):
@@ -106,6 +107,7 @@ class App:
             self.export_dir = os.path.normpath(folder)
             self.lbl_export.config(text=self.export_dir)
             self.plan = None
+            self.applied = False
             self.lbl_summary.config(text="")
             self.btn_open.pack_forget()
             self.lbl_status.config(text="")
@@ -140,11 +142,21 @@ class App:
     def poll(self):
         try:
             while True:
-                msg = self.messages.get_nowait()
-                self.handle(msg)
-        except queue.Empty:
-            pass
-        self.root.after(100, self.poll)
+                try:
+                    msg = self.messages.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self.handle(msg)
+                except Exception as e:      # never let one bad message stop the window
+                    self.busy = False
+                    try:
+                        self.update_buttons()
+                    except Exception:
+                        pass
+                    messagebox.showerror("Takeout Rescue", "Something went wrong: %s" % e)
+        finally:
+            self.root.after(100, self.poll)
 
     def handle(self, msg):
         kind = msg[0]
@@ -154,6 +166,7 @@ class App:
             self.lbl_status.config(text="%d of %d: %s" % (done, total, name))
         elif kind == "scan_done":
             self.busy = False
+            self.applied = False
             self.plan = msg[1]
             self.lbl_summary.config(text=self.plan.plain_summary())
             self.lbl_status.config(text="")
@@ -161,13 +174,18 @@ class App:
             self.update_buttons()
         elif kind == "apply_done":
             self.busy = False
+            self.applied = True
             counts = msg[1]
             text = "Done! Your clean photos are ready."
+            if counts["already_done"]:
+                text += " (%d were already there.)" % counts["already_done"]
             if counts["errors"]:
                 text += " (%d files could not be copied. See the report file.)" % counts["errors"]
             self.lbl_status.config(text=text)
             self.btn_open.pack(anchor="w", pady=6)
             self.update_buttons()
+            if counts["warnings"]:
+                messagebox.showwarning("Takeout Rescue", "\n\n".join(counts["warnings"]))
         elif kind == "error":
             self.busy = False
             self.lbl_status.config(text="")

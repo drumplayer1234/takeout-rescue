@@ -48,13 +48,23 @@ def main(argv=None):
             print("\n".join(plan.summary_lines()))
             print("Copying...")
             counts = core.apply(plan, args.out_dir, progress_cb=_progress)
-            print("Done. Copied %(copied)d files, %(exif_written)d with metadata written, "
-                  "%(errors)d errors." % counts)
-            print("Report: %s" % core.REPORT_NAME)
+            print("Done. Copied %(copied)d files, %(already_done)d already done, "
+                  "%(exif_written)d with metadata written, %(errors)d errors." % counts)
+            if counts["not_copied_unknown"] or counts["could_not_read"]:
+                print("Not copied: %(not_copied_unknown)d unknown type, "
+                      "%(could_not_read)d could not be read." % counts)
+            for warning in counts["warnings"]:
+                print("Warning: %s" % warning)
+            if counts["report"]:
+                print("Report: %s" % counts["report"])
             return 1 if counts["errors"] else 0
         elif args.command == "undo":
-            n = core.undo(args.out_dir)
+            problems = []
+            n = core.undo(args.out_dir, problems)
             print("Removed %d files." % n)
+            for problem in problems:
+                print("Problem: %s" % problem)
+            return 1 if problems else 0
     except core.TakeoutError as e:
         print("Error: %s" % e, file=sys.stderr)
         return 2

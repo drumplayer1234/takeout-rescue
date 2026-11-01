@@ -4,13 +4,19 @@
 
 Creates <dest_dir>/Takeout/Google Photos/... and <dest_dir>/expected.json.
 Uses only the standard library.
+
+Photo times are written as LOCAL wall-clock times and converted to real epoch
+seconds for the JSON files.  So the expected folders (and the times in
+expected.json) are the same on any computer, in any time zone.
 """
 
 import calendar
+import datetime
 import json
 import os
 import struct
 import sys
+import time
 
 # --------------------------------------------------------------------------
 # Tiny valid JPEG (1x1 grey), built from its segments so it is easy to read.
@@ -64,17 +70,27 @@ def make_video(tag: str) -> bytes:
 # --------------------------------------------------------------------------
 
 def epoch(y, mo, d, h=0, mi=0, s=0) -> int:
+    """The real moment (epoch seconds) of a local wall-clock time on this computer."""
+    return int(time.mktime((y, mo, d, h, mi, s, 0, 0, -1)))
+
+
+def utc_epoch(y, mo, d, h=0, mi=0, s=0) -> int:
+    """Epoch seconds for a UTC time.  Works before 1970 too (mktime does not)."""
     return calendar.timegm((y, mo, d, h, mi, s, 0, 0, 0))
+
+
+def local_text(y, mo, d, h=0, mi=0, s=0) -> str:
+    return datetime.datetime(y, mo, d, h, mi, s).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def sidecar(title, taken=None, geo=None, description=""):
     """A JSON sidecar shaped like the real thing."""
-    creation = epoch(2024, 2, 1, 9, 0, 0)       # pretend "download" date
+    creation = epoch(2024, 2, 15, 12, 0, 0)     # pretend "upload" date
     data = {
         "title": title,
         "description": description,
         "imageViews": "3",
-        "creationTime": {"timestamp": str(creation), "formatted": "Feb 1, 2024"},
+        "creationTime": {"timestamp": str(creation), "formatted": "Feb 15, 2024"},
         "geoData": {"latitude": 0.0, "longitude": 0.0, "altitude": 0.0,
                     "latitudeSpan": 0.0, "longitudeSpan": 0.0},
         "url": "https://photos.google.com/photo/fake",
@@ -101,14 +117,20 @@ def make_fake_takeout(dest_dir: str) -> dict:
     def write_json(folder, name, obj):
         write(folder, name, json.dumps(obj, indent=2).encode("utf-8"))
 
-    def expect(path, taken, source, src, albums=(), geo=False):
+    def expect(path, taken, source, src, albums=(), geo=False, exact=True):
+        # "taken" is the local wall-clock time the photo should get (or None).
         # "sources" are relative to the Takeout folder (what the user would pick).
-        expected_files.append({"path": path, "taken": taken, "date_source": source,
+        # exact=False: only the year and month are the same in every time zone.
+        if isinstance(taken, int):
+            taken = datetime.datetime.fromtimestamp(taken).strftime("%Y-%m-%d %H:%M:%S")
+        expected_files.append({"path": path, "taken": taken, "taken_exact": exact,
+                               "date_source": source,
                                "sources": ["Google Photos/" + s for s in src],
                                "albums": list(albums), "has_geo": geo})
 
     P18, P19, P20 = "Photos from 2018", "Photos from 2019", "Photos from 2020"
     P21, P22, BEACH = "Photos from 2021", "Photos from 2022", "Beach Trip"
+    P65 = "Photos from 1965"
     SEP = "/"
 
     # --- 2018 ---------------------------------------------------------------
@@ -168,6 +190,13 @@ def make_fake_takeout(dest_dir: str) -> dict:
     expect("2019/09/IMG_0001.jpg", t_b, "json", [BEACH + SEP + "IMG_0001.jpg"], albums=[BEACH])
     expect("2019/09/IMG_0001 (2).jpg", t_a, "json", [P19 + SEP + "IMG_0001.jpg"])
 
+    # 23:30 local time on New Year's Eve: must stay in December whatever the time
+    # zone, because the epoch is built from the local time.
+    t = epoch(2019, 12, 31, 23, 30, 0)
+    write(P19, "new_years_eve.jpg", make_jpeg("new_years_eve"))
+    write_json(P19, "new_years_eve.jpg.json", sidecar("new_years_eve.jpg", t))
+    expect("2019/12/new_years_eve.jpg", t, "json", [P19 + SEP + "new_years_eve.jpg"])
+
     # Album folders carry a metadata.json that is NOT a photo sidecar.
     write_json(BEACH, "metadata.json", {
         "title": BEACH, "description": "", "access": "",
@@ -204,14 +233,34 @@ def make_fake_takeout(dest_dir: str) -> dict:
     write_json(P22, "holiday_clip.mp4.json", sidecar("holiday_clip.mp4", t))
     expect("2022/06/holiday_clip.mp4", t, "json", [P22 + SEP + "holiday_clip.mp4"])
 
+    # --- Special cases -------------------------------------------------------
+    # A scan of a 1965 photo.  The JSON date is before 1971, which must still count.
+    # (Only the month is the same in every time zone, so taken_exact is False.)
+    t = utc_epoch(1965, 6, 15, 12, 0, 0)
+    write(P65, "old_scan_1965.jpg", make_jpeg("old_scan_1965"))
+    write_json(P65, "old_scan_1965.jpg.json", sidecar("old_scan_1965.jpg", t))
+    expect("1965/06/old_scan_1965.jpg", "1965-06-15 12:00:00", "json",
+           [P65 + SEP + "old_scan_1965.jpg"], exact=False)
+
+    # JSON with no photoTakenTime: only the upload date (creationTime) is known.
+    write(P22, "upload_only.jpg", make_jpeg("upload_only"))
+    write_json(P22, "upload_only.jpg.json", sidecar("upload_only.jpg"))
+    expect("2024/02/upload_only.jpg", local_text(2024, 2, 15, 12), "upload_date",
+           [P22 + SEP + "upload_only.jpg"])
+
+    # Not a photo or video: never copied, but always listed.
+    write(P22, "notes.txt", b"not a photo")
+
     expected_files.sort(key=lambda e: e["path"])
     expected = {
         "files": expected_files,
         "summary": {
-            "total_media": 15, "unique": 13, "duplicates_removed": 2,
-            "dates_json": 10, "dates_exif": 1, "dates_filename": 1, "dates_unknown": 1,
-            "edited": 1, "with_location": 1,
+            "total_media": 18, "unique": 16, "duplicates_removed": 2,
+            "dates_json": 12, "dates_exif": 1, "dates_filename": 1, "dates_upload": 1,
+            "dates_unknown": 1, "edited": 1, "with_location": 1,
+            "not_copied_unknown": 1, "could_not_read": 0,
         },
+        "not_copied": ["Google Photos/" + P22 + "/notes.txt"],
         # Without piexif the EXIF-only photo cannot be read, so it has no date.
         "without_piexif": {
             "path": "2018/12/exif_only.jpg",
