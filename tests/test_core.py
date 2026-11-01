@@ -194,6 +194,24 @@ class ScanAndApplyTests(FakeTakeoutTestCase):
             self.assertAlmostEqual(mtime, want, delta=2, msg=f["path"])
         self.assertEqual(not_set, set())
 
+    @unittest.skipUnless(os.name == "nt", "Windows creation time")
+    def test_creation_time_matches_file_date(self):
+        core.apply(self.plan, self.out_dir)
+        checked = 0
+        for f in self.expected_files():
+            if f["taken"] is None:
+                continue
+            st = os.stat(os.path.join(self.out_dir, *f["path"].split("/")))
+            created = getattr(st, "st_birthtime", st.st_ctime)
+            self.assertAlmostEqual(created, st.st_mtime, delta=2, msg=f["path"])
+            checked += 1
+        self.assertGreater(checked, 0)
+        st = os.stat(os.path.join(self.out_dir, "1965", "06", "old_scan_1965.jpg"))
+        created = getattr(st, "st_birthtime", st.st_ctime)
+        self.assertEqual(core._local_from_epoch(int(created)).year, 1965)
+        self.assertFalse([r for r in read_report(self.out_dir)
+                          if "created date not set" in r["action"]])
+
     def test_date_sources_and_albums(self):
         by_source = {it.rel_source.replace(os.sep, "/"): it for it in self.plan.items}
         for f in self.expected_files():
@@ -1035,6 +1053,13 @@ class SmallPieceTests(unittest.TestCase):
             self.assertEqual(core.filename_taken_time(name), want, name)
         self.assertEqual(core.filename_taken_time("scan_19650615_120000.jpg"),
                          dt.datetime(1965, 6, 15, 12, 0, 0))
+
+    def test_filetime_conversion(self):
+        self.assertEqual(core._filetime_from_unix(0), 116444736000000000)
+        self.assertEqual(core._filetime_from_unix(-11644473600), 0)
+        self.assertIsNone(core._filetime_from_unix(-11644473601))
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            self.assertIsNone(core._filetime_from_unix(bad))
 
     def test_dms_carries_over_when_seconds_round_to_60(self):
         self.assertEqual(core._dms(10.99999999999), ((11, 1), (0, 1), (0, 10000)))

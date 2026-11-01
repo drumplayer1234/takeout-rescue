@@ -18,6 +18,7 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -873,6 +874,63 @@ def _set_file_date(path: str, mtime: Optional[float]) -> bool:
         return False
 
 
+_WIN_EPOCH_OFFSET = 11644473600          # seconds from 1601-01-01 to 1970-01-01
+_kernel32 = None
+
+
+def _filetime_from_unix(secs: float) -> Optional[int]:
+    """Windows FILETIME (100 ns ticks since 1601) for unix seconds, or None if not representable."""
+    try:
+        if not math.isfinite(secs):
+            return None
+        ticks = int((secs + _WIN_EPOCH_OFFSET) * 10_000_000)
+    except (OverflowError, ValueError, TypeError):
+        return None
+    return ticks if 0 <= ticks < 2 ** 64 else None
+
+
+def _set_creation_time(path: str, secs: Optional[float]) -> bool:
+    """Set the Windows 'Created' time to match the file date.  No-op (True) elsewhere.
+    False if it could not be set."""
+    if os.name != "nt":
+        return True
+    if secs is None:
+        return False
+    ticks = _filetime_from_unix(secs)
+    if ticks is None:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        global _kernel32
+        if _kernel32 is None:
+            k = ctypes.WinDLL("kernel32", use_last_error=True)
+            k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.HANDLE]
+            k.CreateFileW.restype = wintypes.HANDLE
+            k.SetFileTime.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+                                      ctypes.POINTER(wintypes.FILETIME),
+                                      ctypes.POINTER(wintypes.FILETIME)]
+            k.SetFileTime.restype = wintypes.BOOL
+            k.CloseHandle.argtypes = [wintypes.HANDLE]
+            k.CloseHandle.restype = wintypes.BOOL
+            _kernel32 = k
+        k = _kernel32
+        invalid = ctypes.c_void_p(-1).value
+        # FILE_WRITE_ATTRIBUTES; share read|write|delete; OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS
+        handle = k.CreateFileW(path, 0x100, 0x7, None, 3, 0x02000000, None)
+        if handle is None or handle == invalid:
+            return False
+        try:
+            ft = wintypes.FILETIME(ticks & 0xFFFFFFFF, ticks >> 32)
+            return bool(k.SetFileTime(handle, ctypes.byref(ft), None, None))
+        finally:
+            k.CloseHandle(handle)
+    except Exception:
+        return False
+
+
 def apply(plan: Plan, out_dir: str,
           progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
     """Copy the unique files into out_dir/YYYY/MM.  Never touches the input.
@@ -989,6 +1047,8 @@ def apply(plan: Plan, out_dir: str,
                     if item.taken is not None and not _set_file_date(dest, item.mtime):
                         result["file_date_not_set"] += 1
                         action += "; file date not set"
+                    elif item.taken is not None and not _set_creation_time(dest, item.mtime):
+                        action += "; created date not set"
             taken_text = item.taken.strftime("%Y-%m-%d %H:%M:%S") if item.taken else ""
             rows.append([
                 item.rel_source, dest_rel if status != "error" else "", taken_text,
