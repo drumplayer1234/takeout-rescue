@@ -9,7 +9,7 @@
 import argparse
 import sys
 
-from . import core
+from . import __version__, core
 
 
 def _progress(done, total, name):
@@ -28,6 +28,8 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(prog="takeout_rescue",
                                      description="Rescue photos from a Google Takeout export.")
+    parser.add_argument("--version", action="version",
+                        version="Takeout Rescue %s" % __version__)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("scan", help="show what is in the export (changes nothing)")
     p.add_argument("export_dir")

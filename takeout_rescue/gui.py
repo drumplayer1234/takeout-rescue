@@ -10,7 +10,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import core
+from . import __version__, core
 
 BIG = ("Segoe UI", 14)
 HEADING = ("Segoe UI", 18, "bold")
@@ -19,7 +19,7 @@ HEADING = ("Segoe UI", 18, "bold")
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("Takeout Rescue")
+        root.title("Takeout Rescue %s" % __version__)
         root.geometry("760x640")
 
         self.export_dir = ""
@@ -71,6 +71,11 @@ class App:
         self.btn_open = tk.Button(frame, text="Open folder", font=BIG, command=self.open_folder)
         # The "Open folder" button only appears when everything is finished.
 
+        # Undo works on the chosen save folder; enabled only if it holds a manifest.
+        self.btn_undo = tk.Button(frame, text="Undo last fix", font=BIG,
+                                  command=self.start_undo, state="disabled")
+        self.btn_undo.pack(anchor="w", pady=(12, 0))
+
         root.after(100, self.poll)
 
     # ---- helpers ---------------------------------------------------------
@@ -82,6 +87,20 @@ class App:
         self.btn_out.config(state="normal" if (self.plan and not self.busy) else "disabled")
         ready = self.plan and self.out_dir and not self.busy and not self.applied
         self.btn_fix.config(state="normal" if ready else "disabled")
+        can_undo = bool(self.out_dir) and not self.busy and self.manifest_count() is not None
+        self.btn_undo.config(state="normal" if can_undo else "disabled")
+
+    def manifest_count(self):
+        """Number of files a previous fix recorded in the save folder, or None if no manifest."""
+        if not self.out_dir:
+            return None
+        path = os.path.join(self.out_dir, core.MANIFEST_NAME)
+        if not os.path.isfile(path):
+            return None
+        try:
+            return len(core._load_manifest(path)["files"])
+        except Exception:
+            return 0
 
     def run_in_thread(self, work, done_kind):
         """Run work(progress) in a thread; results come back through the queue."""
@@ -132,6 +151,25 @@ class App:
         self.progress.config(value=0)
         plan, out_dir = self.plan, self.out_dir
         self.run_in_thread(lambda progress: core.apply(plan, out_dir, progress), "apply_done")
+
+    def start_undo(self):
+        count = self.manifest_count()
+        if count is None or self.busy:
+            return
+        out_dir = self.out_dir
+        if not messagebox.askyesno(
+                "Takeout Rescue",
+                "Remove the %d photos Takeout Rescue copied into %s?\n\n"
+                "Your original download is not touched." % (count, out_dir)):
+            return
+        self.btn_open.pack_forget()
+        self.lbl_status.config(text="Removing the copied photos...")
+
+        def work(progress):
+            problems = []
+            return core.undo(out_dir, problems), problems
+
+        self.run_in_thread(work, "undo_done")
 
     def open_folder(self):
         if self.out_dir and os.path.isdir(self.out_dir):
@@ -186,6 +224,15 @@ class App:
             self.update_buttons()
             if counts["warnings"]:
                 messagebox.showwarning("Takeout Rescue", "\n\n".join(counts["warnings"]))
+        elif kind == "undo_done":
+            self.busy = False
+            self.applied = False
+            removed, problems = msg[1]
+            self.lbl_status.config(text="Removed %d files." % removed)
+            self.update_buttons()
+            if problems:
+                messagebox.showwarning("Takeout Rescue", "Removed %d files, but:\n\n%s"
+                                       % (removed, "\n".join(problems)))
         elif kind == "error":
             self.busy = False
             self.lbl_status.config(text="")

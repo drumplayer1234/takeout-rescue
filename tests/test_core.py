@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import queue
 import shutil
 import stat
 import sys
@@ -1132,6 +1133,42 @@ class GuiTests(unittest.TestCase):
         self.app.busy = True
         self.app.handle(("scan_done", FakePlan()))
         self.assertEqual(self.fix_state(), "normal")
+
+    def test_undo_button_follows_the_manifest_and_undoes(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        undo_state = lambda: str(self.app.btn_undo.cget("state"))
+        self.app.out_dir = folder
+        self.app.update_buttons()
+        self.assertEqual(undo_state(), "disabled")      # no manifest yet
+        with open(os.path.join(folder, core.MANIFEST_NAME), "w") as f:
+            json.dump({"version": 1, "files": [], "dirs": []}, f)
+        self.app.update_buttons()
+        self.assertEqual(undo_state(), "normal")
+        self.app.busy = True
+        self.app.update_buttons()
+        self.assertEqual(undo_state(), "disabled")      # disabled while busy
+        self.app.busy = False
+
+        with mock.patch.object(self.gui.messagebox, "askyesno", return_value=False) as ask:
+            self.app.start_undo()
+        self.assertIn(folder, ask.call_args[0][1])
+        self.assertFalse(self.app.busy)                 # said no: nothing started
+
+        with mock.patch.object(self.gui.messagebox, "askyesno", return_value=True):
+            self.app.start_undo()
+        self.assertTrue(self.app.busy)
+        for _ in range(100):
+            try:
+                msg = self.app.messages.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if msg[0] != "progress":
+                break
+        self.assertEqual(msg[0], "undo_done")
+        self.assertEqual(msg[1], (0, []))
+        self.app.handle(msg)
+        self.assertFalse(self.app.busy)
 
 
 if __name__ == "__main__":

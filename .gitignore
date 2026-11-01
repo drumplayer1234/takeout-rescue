@@ -5,3 +5,8 @@ __pycache__/
 test_output/
 fake_takeout/
 OUTPUT/
+build/
+dist/
+*.spec
+fake_data/
+fake_data_out/
